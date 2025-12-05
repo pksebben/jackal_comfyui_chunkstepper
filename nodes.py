@@ -3,6 +3,7 @@
 Manages iterative video chunk generation workflow for AnimateDiff and similar tools.
 """
 
+import re
 from pathlib import Path
 
 import cv2
@@ -10,6 +11,12 @@ import torch
 
 # Common video extensions to check for previous chunks
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
+
+# Image extensions that ComfyUI may save frames as
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff")
+
+# Combined extensions for file search
+ALL_EXTENSIONS = VIDEO_EXTENSIONS + IMAGE_EXTENSIONS
 
 
 class VideoChunkStepper:
@@ -53,6 +60,21 @@ class VideoChunkStepper:
                         "placeholder": "_draft",
                     },
                 ),
+                "variation_preference": (
+                    "INT",
+                    {
+                        "default": -1,
+                        "min": -1,
+                        "max": 99999,
+                        "step": 1,
+                        "display": "number",
+                        "tooltip": (
+                            "ComfyUI appends counter numbers to filenames. "
+                            "-1 = use lowest number (default), "
+                            "0+ = prefer specific variation number"
+                        ),
+                    },
+                ),
             },
         }
 
@@ -72,6 +94,7 @@ class VideoChunkStepper:
         chunk_number: int,
         init_image: torch.Tensor,
         suffix: str = "",
+        variation_preference: int = -1,
     ) -> tuple[str, torch.Tensor]:
         """Execute the node logic.
 
@@ -80,6 +103,7 @@ class VideoChunkStepper:
             chunk_number: Current chunk index (0-indexed)
             init_image: Starting frame for chunk 0
             suffix: Optional string appended to chunk filename
+            variation_preference: ComfyUI counter preference (-1 = lowest, 0+ = specific)
 
         Returns:
             Tuple of (output_path, frame)
@@ -99,7 +123,7 @@ class VideoChunkStepper:
         else:
             # For chunk N > 0, load the last frame from chunk N-1
             frame = self._load_last_frame_from_previous_chunk(
-                chunks_path, chunk_number, suffix
+                chunks_path, chunk_number, suffix, variation_preference
             )
 
         return (output_path, frame)
@@ -109,13 +133,15 @@ class VideoChunkStepper:
         chunks_path: Path,
         chunk_number: int,
         suffix: str,
+        variation_preference: int = -1,
     ) -> torch.Tensor:
-        """Load the last frame from the previous chunk video.
+        """Load the last frame from the previous chunk video/image.
 
         Args:
             chunks_path: Base directory where chunks are saved
             chunk_number: Current chunk index
             suffix: Suffix used in filenames
+            variation_preference: ComfyUI counter preference (-1 = lowest, 0+ = specific)
 
         Returns:
             Last frame as IMAGE tensor [1, H, W, C]
@@ -127,52 +153,143 @@ class VideoChunkStepper:
         prev_chunk_num = chunk_number - 1
         prev_chunk_base = f"{prev_chunk_num:04d}{suffix}"
 
-        # Find previous chunk file (check all video extensions)
-        prev_chunk_file = self._find_video_file(chunks_path, prev_chunk_base)
+        # Find previous chunk file (check all video and image extensions)
+        prev_chunk_file = self._find_media_file(
+            chunks_path, prev_chunk_base, variation_preference
+        )
 
         if prev_chunk_file is None:
-            expected_path = chunks_path / f"{prev_chunk_base}.<video_ext>"
+            expected_path = chunks_path / f"{prev_chunk_base}[_NNNNN_].<ext>"
             raise FileNotFoundError(
                 f"Previous chunk not found. Expected file matching: {expected_path}\n"
-                f"Checked extensions: {VIDEO_EXTENSIONS}"
+                f"Checked extensions: {ALL_EXTENSIONS}"
             )
 
-        # Load the video and extract last frame
+        # Load the media and extract last frame (or the image itself)
         return self._extract_last_frame(prev_chunk_file)
 
-    def _find_video_file(self, directory: Path, base_name: str) -> Path | None:
-        """Find a video file matching the base name with any video extension.
+    def _find_media_file(
+        self, directory: Path, base_name: str, variation_preference: int = -1
+    ) -> Path | None:
+        """Find a media file matching the base name with any supported extension.
 
-        Also handles ComfyUI's counter suffix (e.g., 0001_00001.mp4).
+        Handles ComfyUI's counter suffix pattern (e.g., 0000_00001_.webp).
 
         Args:
             directory: Directory to search in
             base_name: Base filename without extension
+            variation_preference: -1 for lowest counter, 0+ for specific counter
 
         Returns:
-            Path to found video file, or None if not found
+            Path to found media file, or None if not found
         """
-        # First, try exact match with each extension
-        for ext in VIDEO_EXTENSIONS:
+        # First, try exact match with each extension (no counter suffix)
+        for ext in ALL_EXTENSIONS:
             candidate = directory / f"{base_name}{ext}"
             if candidate.exists():
                 return candidate
 
-        # Check for files with ComfyUI counter suffix (e.g., 0001_00001.mp4)
-        # We'll take the most recently modified one if multiple exist
-        matching_files: list[Path] = []
-        for ext in VIDEO_EXTENSIONS:
-            pattern = f"{base_name}_*{ext}"
-            matching_files.extend(directory.glob(pattern))
+        # Check for files with ComfyUI counter suffix
+        # ComfyUI pattern: {base_name}_{counter}_.ext (note trailing underscore)
+        matching_files: list[tuple[int, Path]] = []
 
-        if matching_files:
-            # Sort by modification time (newest first) and return the newest
-            matching_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            return matching_files[0]
+        for ext in ALL_EXTENSIONS:
+            # Pattern matches both {base}_{counter}.ext and {base}_{counter}_.ext
+            for pattern in [f"{base_name}_*{ext}", f"{base_name}_*_{ext}"]:
+                for file_path in directory.glob(pattern):
+                    counter = self._extract_counter_from_filename(
+                        file_path.stem, base_name
+                    )
+                    if counter is not None:
+                        matching_files.append((counter, file_path))
 
+        if not matching_files:
+            return None
+
+        # Remove duplicates (same file matched by multiple patterns)
+        seen_paths: set[Path] = set()
+        unique_files: list[tuple[int, Path]] = []
+        for counter, file_path in matching_files:
+            if file_path not in seen_paths:
+                seen_paths.add(file_path)
+                unique_files.append((counter, file_path))
+
+        if variation_preference >= 0:
+            # Look for specific variation number
+            for counter, file_path in unique_files:
+                if counter == variation_preference:
+                    return file_path
+            # If preferred variation not found, fall back to lowest
+
+        # Sort by counter number (lowest first) and return
+        unique_files.sort(key=lambda x: x[0])
+        return unique_files[0][1]
+
+    def _extract_counter_from_filename(self, stem: str, base_name: str) -> int | None:
+        """Extract the ComfyUI counter number from a filename stem.
+
+        Args:
+            stem: Filename without extension (e.g., "0000_00001_" or "0000_00001")
+            base_name: Expected base name (e.g., "0000")
+
+        Returns:
+            Counter number, or None if pattern doesn't match
+        """
+        # Pattern: {base_name}_{counter} or {base_name}_{counter}_
+        # Counter is typically 5 digits but we accept any number
+        pattern = rf"^{re.escape(base_name)}_(\d+)_?$"
+        match = re.match(pattern, stem)
+        if match:
+            return int(match.group(1))
         return None
 
-    def _extract_last_frame(self, video_path: Path) -> torch.Tensor:
+    def _extract_last_frame(self, media_path: Path) -> torch.Tensor:
+        """Extract the last frame from a video file, or load an image file.
+
+        Args:
+            media_path: Path to the video or image file
+
+        Returns:
+            Frame as IMAGE tensor [1, H, W, C] with values in [0, 1]
+
+        Raises:
+            ValueError: If media can't be read or has no frames
+        """
+        ext = media_path.suffix.lower()
+
+        # Handle image files directly
+        if ext in IMAGE_EXTENSIONS:
+            return self._load_image(media_path)
+
+        # Handle video files
+        return self._extract_last_video_frame(media_path)
+
+    def _load_image(self, image_path: Path) -> torch.Tensor:
+        """Load an image file as a tensor.
+
+        Args:
+            image_path: Path to the image file
+
+        Returns:
+            Image as IMAGE tensor [1, H, W, C] with values in [0, 1]
+
+        Raises:
+            ValueError: If image can't be read
+        """
+        frame = cv2.imread(str(image_path))
+        if frame is None:
+            raise ValueError(f"Could not read image file: {image_path}")
+
+        # Convert BGR to RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Convert to tensor with shape [1, H, W, C] and normalize to [0, 1]
+        frame_tensor = torch.from_numpy(frame_rgb).float() / 255.0
+        frame_tensor = frame_tensor.unsqueeze(0)  # Add batch dimension
+
+        return frame_tensor
+
+    def _extract_last_video_frame(self, video_path: Path) -> torch.Tensor:
         """Extract the last frame from a video file.
 
         Args:
@@ -221,6 +338,7 @@ class VideoChunkStepper:
         chunk_number: int,
         init_image: torch.Tensor,
         suffix: str = "",
+        variation_preference: int = -1,
     ) -> float:
         """Always re-execute when chunk_number > 0 since previous chunk may have changed."""
         if chunk_number > 0:
