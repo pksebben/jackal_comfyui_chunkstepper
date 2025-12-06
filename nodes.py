@@ -8,7 +8,9 @@ from pathlib import Path
 
 import cv2
 import folder_paths
+import numpy as np
 import torch
+from PIL import Image
 
 # Common video extensions to check for previous chunks
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
@@ -264,15 +266,11 @@ class VideoChunkStepper:
         """
         ext = media_path.suffix.lower()
 
-        # Formats that can be animated - try VideoCapture first, fall back to imread
+        # Formats that can be animated - use Pillow which handles them properly
         animated_formats = (".webp", ".gif")
 
         if ext in animated_formats:
-            frame = self._try_extract_last_video_frame(media_path)
-            if frame is not None:
-                return frame
-            # VideoCapture failed, fall back to imread for static images
-            return self._load_image(media_path)
+            return self._extract_last_frame_pillow(media_path)
 
         # Handle static image files directly
         if ext in IMAGE_EXTENSIONS:
@@ -280,6 +278,43 @@ class VideoChunkStepper:
 
         # Handle video files
         return self._extract_last_video_frame(media_path)
+
+    def _extract_last_frame_pillow(self, image_path: Path) -> torch.Tensor:
+        """Extract the last frame from an animated image using Pillow.
+
+        Works with animated webp, gif, and static images.
+
+        Args:
+            image_path: Path to the image file
+
+        Returns:
+            Last frame as IMAGE tensor [1, H, W, C] with values in [0, 1]
+
+        Raises:
+            ValueError: If image can't be read
+        """
+        try:
+            img = Image.open(image_path)
+        except Exception as e:
+            raise ValueError(f"Could not open image file: {image_path}") from e
+
+        # Seek to the last frame for animated images
+        try:
+            while True:
+                img.seek(img.tell() + 1)
+        except EOFError:
+            # Reached the last frame
+            pass
+
+        # Convert to RGB (handles RGBA, P mode, etc.)
+        img_rgb = img.convert("RGB")
+
+        # Convert to numpy array then tensor
+        frame_array = np.array(img_rgb, dtype=np.float32) / 255.0
+        frame_tensor = torch.from_numpy(frame_array)
+        frame_tensor = frame_tensor.unsqueeze(0)  # Add batch dimension [1, H, W, C]
+
+        return frame_tensor
 
     def _load_image(self, image_path: Path) -> torch.Tensor:
         """Load an image file as a tensor.
@@ -305,43 +340,6 @@ class VideoChunkStepper:
         frame_tensor = frame_tensor.unsqueeze(0)  # Add batch dimension
 
         return frame_tensor
-
-    def _try_extract_last_video_frame(self, video_path: Path) -> torch.Tensor | None:
-        """Try to extract the last frame from a video/animation file.
-
-        Args:
-            video_path: Path to the video file
-
-        Returns:
-            Last frame as IMAGE tensor [1, H, W, C], or None if extraction fails
-        """
-        cap = cv2.VideoCapture(str(video_path))
-
-        if not cap.isOpened():
-            return None
-
-        try:
-            last_frame = None
-            while True:
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    break
-                last_frame = frame
-
-            if last_frame is None:
-                return None
-
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
-
-            # Convert to tensor with shape [1, H, W, C] and normalize to [0, 1]
-            frame_tensor = torch.from_numpy(frame_rgb).float() / 255.0
-            frame_tensor = frame_tensor.unsqueeze(0)  # Add batch dimension
-
-            return frame_tensor
-
-        finally:
-            cap.release()
 
     def _extract_last_video_frame(self, video_path: Path) -> torch.Tensor:
         """Extract the last frame from a video file.
