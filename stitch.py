@@ -21,6 +21,8 @@ from pathlib import Path
 import cv2
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff")
+ALL_EXTENSIONS = VIDEO_EXTENSIONS + IMAGE_EXTENSIONS
 
 
 def extract_counter(filename: str, chunk_num: int) -> int | None:
@@ -59,7 +61,9 @@ def find_chunks(chunks_dir: Path) -> dict[int, list[tuple[Path, int | None]]]:
 
     # Pattern to match chunk files: 4-digit number at start, optionally followed
     # by suffix and/or ComfyUI counter
-    pattern = re.compile(r"^(\d{4}).*\.(mp4|webm|mov|avi|mkv|gif)$", re.IGNORECASE)
+    # Supports video and image extensions
+    ext_pattern = "|".join(ext.lstrip(".") for ext in ALL_EXTENSIONS)
+    pattern = re.compile(rf"^(\d{{4}}).*\.({ext_pattern})$", re.IGNORECASE)
 
     for file in chunks_dir.iterdir():
         if not file.is_file():
