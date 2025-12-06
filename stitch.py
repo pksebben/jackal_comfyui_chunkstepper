@@ -22,9 +22,11 @@ import cv2
 import numpy as np
 from PIL import Image
 
-VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff")
-ALL_EXTENSIONS = VIDEO_EXTENSIONS + IMAGE_EXTENSIONS
+VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
+ANIMATED_EXTENSIONS = (".gif", ".webp")
+# Extensions that can be stitched into a video (videos + animated images)
+STITCHABLE_EXTENSIONS = VIDEO_EXTENSIONS + ANIMATED_EXTENSIONS
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tiff")
 
 
 def extract_counter(filename: str, chunk_num: int) -> int | None:
@@ -50,7 +52,10 @@ def extract_counter(filename: str, chunk_num: int) -> int | None:
 
 
 def find_chunks(chunks_dir: Path) -> dict[int, list[tuple[Path, int | None]]]:
-    """Find all chunk files in the directory, grouped by chunk number.
+    """Find all video chunk files in the directory, grouped by chunk number.
+
+    Only finds video files and animated formats (gif, webp) that can be stitched.
+    Static images like .png are ignored.
 
     Args:
         chunks_dir: Directory containing chunk files
@@ -63,8 +68,8 @@ def find_chunks(chunks_dir: Path) -> dict[int, list[tuple[Path, int | None]]]:
 
     # Pattern to match chunk files: 4-digit number at start, optionally followed
     # by suffix and/or ComfyUI counter
-    # Supports video and image extensions
-    ext_pattern = "|".join(ext.lstrip(".") for ext in ALL_EXTENSIONS)
+    # Only matches video and animated image extensions (not static images)
+    ext_pattern = "|".join(ext.lstrip(".") for ext in STITCHABLE_EXTENSIONS)
     pattern = re.compile(rf"^(\d{{4}}).*\.({ext_pattern})$", re.IGNORECASE)
 
     for file in chunks_dir.iterdir():
@@ -193,9 +198,6 @@ def select_chunk_file(
             sys.exit(1)
 
 
-ANIMATED_FORMATS = (".webp", ".gif")
-
-
 def convert_animated_to_video(
     input_path: Path, output_path: Path, fps: int = 8
 ) -> bool:
@@ -260,7 +262,7 @@ def prepare_chunks_for_concat(
     any_converted = False
 
     for i, chunk in enumerate(chunks):
-        if chunk.suffix.lower() in ANIMATED_FORMATS:
+        if chunk.suffix.lower() in ANIMATED_EXTENSIONS:
             # Convert animated format to video
             converted_path = temp_dir / f"chunk_{i:04d}.mp4"
             print(f"  Converting {chunk.name} to video...")
@@ -311,7 +313,7 @@ def stitch_videos(
         temp_path = Path(temp_dir)
 
         # Convert animated formats (webp, gif) to video first
-        has_animated = any(c.suffix.lower() in ANIMATED_FORMATS for c in chunks)
+        has_animated = any(c.suffix.lower() in ANIMATED_EXTENSIONS for c in chunks)
         if has_animated:
             print("\nConverting animated chunks to video format...")
             prepared_chunks, _ = prepare_chunks_for_concat(chunks, temp_path)
@@ -516,6 +518,19 @@ The script will:
             f"(Higher chunks exist up to {max_chunk:04d} but will be skipped)",
             file=sys.stderr,
         )
+
+    # Validate all chunks are the same file type
+    extensions = {chunk.suffix.lower() for chunk in ordered_chunks}
+    if len(extensions) > 1:
+        print(
+            f"Error: Mixed file types found: {', '.join(sorted(extensions))}",
+            file=sys.stderr,
+        )
+        print(
+            "All chunks must be the same file type (e.g., all .mp4 or all .webm)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     print(f"\nFound {len(ordered_chunks)} sequential chunks:")
     for i, chunk in enumerate(ordered_chunks):
