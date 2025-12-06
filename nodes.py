@@ -314,20 +314,20 @@ class VideoChunkStepper:
             raise ValueError(f"Could not open video file: {video_path}")
 
         try:
-            # Get total frame count
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if frame_count <= 0:
+            # Iterate through all frames to reliably get the last one
+            # Note: cap.set(CAP_PROP_POS_FRAMES) is unreliable for many codecs
+            last_frame = None
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                last_frame = frame
+
+            if last_frame is None:
                 raise ValueError(f"Video has no frames: {video_path}")
 
-            # Seek to last frame
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count - 1)
-
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                raise ValueError(f"Could not read last frame from: {video_path}")
-
             # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
 
             # Convert to tensor with shape [1, H, W, C] and normalize to [0, 1]
             frame_tensor = torch.from_numpy(frame_rgb).float() / 255.0
