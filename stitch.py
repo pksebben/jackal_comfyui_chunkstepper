@@ -191,6 +191,73 @@ def select_chunk_file(
             sys.exit(1)
 
 
+ANIMATED_FORMATS = (".webp", ".gif")
+
+
+def convert_animated_to_video(input_path: Path, output_path: Path) -> bool:
+    """Convert an animated WebP/GIF to a video file.
+
+    Args:
+        input_path: Path to animated image
+        output_path: Path for output video
+
+    Returns:
+        True if conversion succeeded, False otherwise
+    """
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_path),
+        "-c:v",
+        "libx264",
+        "-crf",
+        "18",
+        "-preset",
+        "fast",
+        "-pix_fmt",
+        "yuv420p",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def prepare_chunks_for_concat(
+    chunks: list[Path], temp_dir: Path
+) -> tuple[list[Path], bool]:
+    """Prepare chunks for concatenation, converting animated formats if needed.
+
+    Args:
+        chunks: List of chunk files
+        temp_dir: Temporary directory for converted files
+
+    Returns:
+        Tuple of (prepared chunk paths, whether any conversion was done)
+    """
+    prepared: list[Path] = []
+    any_converted = False
+
+    for i, chunk in enumerate(chunks):
+        if chunk.suffix.lower() in ANIMATED_FORMATS:
+            # Convert animated format to video
+            converted_path = temp_dir / f"chunk_{i:04d}.mp4"
+            print(f"  Converting {chunk.name} to video...")
+            if convert_animated_to_video(chunk, converted_path):
+                prepared.append(converted_path)
+                any_converted = True
+            else:
+                print(f"  Warning: Failed to convert {chunk.name}, using original")
+                prepared.append(chunk)
+        else:
+            prepared.append(chunk)
+
+    return prepared, any_converted
+
+
 def create_concat_file(chunks: list[Path], temp_dir: Path) -> Path:
     """Create FFmpeg concat demuxer file.
 
@@ -224,7 +291,16 @@ def stitch_videos(
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        concat_file = create_concat_file(chunks, temp_path)
+
+        # Convert animated formats (webp, gif) to video first
+        has_animated = any(c.suffix.lower() in ANIMATED_FORMATS for c in chunks)
+        if has_animated:
+            print("\nConverting animated chunks to video format...")
+            prepared_chunks, _ = prepare_chunks_for_concat(chunks, temp_path)
+        else:
+            prepared_chunks = chunks
+
+        concat_file = create_concat_file(prepared_chunks, temp_path)
 
         # FFmpeg command for lossless concatenation
         # -safe 0: Allow any file path in concat file
