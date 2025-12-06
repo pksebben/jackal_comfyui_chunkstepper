@@ -264,12 +264,15 @@ class VideoChunkStepper:
         """
         ext = media_path.suffix.lower()
 
-        # Formats that can be animated - treat like videos
+        # Formats that can be animated - try VideoCapture first, fall back to imread
         animated_formats = (".webp", ".gif")
 
         if ext in animated_formats:
-            # Use VideoCapture to handle animated formats
-            return self._extract_last_video_frame(media_path)
+            frame = self._try_extract_last_video_frame(media_path)
+            if frame is not None:
+                return frame
+            # VideoCapture failed, fall back to imread for static images
+            return self._load_image(media_path)
 
         # Handle static image files directly
         if ext in IMAGE_EXTENSIONS:
@@ -302,6 +305,43 @@ class VideoChunkStepper:
         frame_tensor = frame_tensor.unsqueeze(0)  # Add batch dimension
 
         return frame_tensor
+
+    def _try_extract_last_video_frame(self, video_path: Path) -> torch.Tensor | None:
+        """Try to extract the last frame from a video/animation file.
+
+        Args:
+            video_path: Path to the video file
+
+        Returns:
+            Last frame as IMAGE tensor [1, H, W, C], or None if extraction fails
+        """
+        cap = cv2.VideoCapture(str(video_path))
+
+        if not cap.isOpened():
+            return None
+
+        try:
+            last_frame = None
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                last_frame = frame
+
+            if last_frame is None:
+                return None
+
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
+
+            # Convert to tensor with shape [1, H, W, C] and normalize to [0, 1]
+            frame_tensor = torch.from_numpy(frame_rgb).float() / 255.0
+            frame_tensor = frame_tensor.unsqueeze(0)  # Add batch dimension
+
+            return frame_tensor
+
+        finally:
+            cap.release()
 
     def _extract_last_video_frame(self, video_path: Path) -> torch.Tensor:
         """Extract the last frame from a video file.
