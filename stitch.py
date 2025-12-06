@@ -23,16 +23,39 @@ import cv2
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
 
 
-def find_chunks(chunks_dir: Path) -> dict[int, list[Path]]:
+def extract_counter(filename: str, chunk_num: int) -> int | None:
+    """Extract the ComfyUI counter number from a filename.
+
+    ComfyUI appends counter suffixes like _00001 or _00001_ to filenames.
+
+    Args:
+        filename: Filename stem (without extension)
+        chunk_num: Expected chunk number prefix (e.g., 0 for "0000")
+
+    Returns:
+        Counter number, or None if no counter pattern found
+    """
+    base_name = f"{chunk_num:04d}"
+    # Pattern: {base_name}_{counter} or {base_name}_{counter}_ or with suffix
+    # e.g., 0000_00001.mp4, 0000_suffix_00001_.mp4
+    pattern = rf"^{re.escape(base_name)}(?:_[^_]+)?_(\d+)_?$"
+    match = re.match(pattern, filename)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def find_chunks(chunks_dir: Path) -> dict[int, list[tuple[Path, int | None]]]:
     """Find all chunk files in the directory, grouped by chunk number.
 
     Args:
         chunks_dir: Directory containing chunk files
 
     Returns:
-        Dictionary mapping chunk number to list of matching files
+        Dictionary mapping chunk number to list of (file_path, counter) tuples.
+        Counter is None for files without ComfyUI counter suffix.
     """
-    chunks: dict[int, list[Path]] = defaultdict(list)
+    chunks: dict[int, list[tuple[Path, int | None]]] = defaultdict(list)
 
     # Pattern to match chunk files: 4-digit number at start, optionally followed
     # by suffix and/or ComfyUI counter
@@ -44,7 +67,8 @@ def find_chunks(chunks_dir: Path) -> dict[int, list[Path]]:
         match = pattern.match(file.name)
         if match:
             chunk_num = int(match.group(1))
-            chunks[chunk_num].append(file)
+            counter = extract_counter(file.stem, chunk_num)
+            chunks[chunk_num].append((file, counter))
 
     return dict(chunks)
 
@@ -84,38 +108,78 @@ def display_thumbnail(video_path: Path, chunk_num: int, index: int) -> None:
 
 def select_chunk_file(
     chunk_num: int,
-    candidates: list[Path],
+    candidates: list[tuple[Path, int | None]],
+    variation_preference: int = -1,
 ) -> Path:
-    """Let user select which file to use when multiple candidates exist.
+    """Select which file to use when multiple candidates exist.
+
+    Auto-selects based on variation_preference, or prompts user if -2 (interactive).
 
     Args:
         chunk_num: The chunk number
-        candidates: List of candidate files
+        candidates: List of (file_path, counter) tuples
+        variation_preference: -1 = lowest counter (default), -2 = interactive,
+                              0+ = prefer specific counter
 
     Returns:
         Selected file path
     """
     if len(candidates) == 1:
-        return candidates[0]
+        return candidates[0][0]
 
+    # Sort by counter (None treated as -1 to come first, then by counter value)
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda x: (x[1] is not None, x[1] if x[1] is not None else 0),
+    )
+
+    # Auto-select based on preference
+    if variation_preference == -1:
+        # Lowest counter (first after sorting)
+        selected = sorted_candidates[0][0]
+        print(f"  Chunk {chunk_num:04d}: auto-selected {selected.name} (lowest)")
+        return selected
+    elif variation_preference >= 0:
+        # Look for specific counter
+        for path, counter in sorted_candidates:
+            if counter == variation_preference:
+                print(
+                    f"  Chunk {chunk_num:04d}: auto-selected {path.name} "
+                    f"(counter {variation_preference})"
+                )
+                return path
+        # Fall back to lowest if preferred not found
+        selected = sorted_candidates[0][0]
+        print(
+            f"  Chunk {chunk_num:04d}: counter {variation_preference} not found, "
+            f"using {selected.name}"
+        )
+        return selected
+
+    # Interactive mode (variation_preference == -2)
     print(f"\nMultiple files found for chunk {chunk_num:04d}:")
     print("Showing video info for each candidate:\n")
 
-    # Sort by modification time (newest first)
-    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+    # For interactive display, sort by modification time (newest first)
+    display_candidates = sorted(
+        candidates, key=lambda x: x[0].stat().st_mtime, reverse=True
+    )
 
-    for i, candidate in enumerate(candidates):
-        display_thumbnail(candidate, chunk_num, i)
+    for i, (path, counter) in enumerate(display_candidates):
+        display_thumbnail(path, chunk_num, i)
+        if counter is not None:
+            print(f"       Counter: {counter}")
 
     while True:
         try:
             choice = input(
-                f"\nSelect file for chunk {chunk_num:04d} [0-{len(candidates) - 1}]: "
+                f"\nSelect file for chunk {chunk_num:04d} "
+                f"[0-{len(display_candidates) - 1}]: "
             )
             idx = int(choice.strip())
-            if 0 <= idx < len(candidates):
-                return candidates[idx]
-            print(f"Please enter a number between 0 and {len(candidates) - 1}")
+            if 0 <= idx < len(display_candidates):
+                return display_candidates[idx][0]
+            print(f"Please enter a number between 0 and {len(display_candidates) - 1}")
         except ValueError:
             print("Please enter a valid number")
         except KeyboardInterrupt:
@@ -245,12 +309,13 @@ Examples:
     python stitch.py ./chunks
     python stitch.py ./chunks ./audio.mp3
     python stitch.py ./chunks ./audio.wav ./final_output.mp4
+    python stitch.py ./chunks -v -2  # interactive mode for duplicates
 
 The script will:
   1. Scan chunks_dir for files matching pattern {chunk_number:04d}*.*
   2. Process chunks in ascending numerical order (0000, 0001, 0002, ...)
   3. Stop when a chunk number is missing
-  4. Prompt for selection when multiple files match the same chunk number
+  4. Auto-select files when duplicates exist (based on --variation setting)
   5. Output an uncompressed MP4, with audio if provided
         """,
     )
@@ -272,6 +337,17 @@ The script will:
         nargs="?",
         default=Path("output.mp4"),
         help="Output file path (default: output.mp4)",
+    )
+    parser.add_argument(
+        "-v",
+        "--variation",
+        type=int,
+        default=-1,
+        help=(
+            "ComfyUI counter preference when duplicates exist. "
+            "-1 = lowest counter (default), -2 = interactive picker, "
+            "0+ = prefer specific counter number"
+        ),
     )
 
     args = parser.parse_args()
@@ -314,7 +390,7 @@ The script will:
 
     while chunk_num in chunk_map:
         candidates = chunk_map[chunk_num]
-        selected = select_chunk_file(chunk_num, candidates)
+        selected = select_chunk_file(chunk_num, candidates, args.variation)
         ordered_chunks.append(selected)
         chunk_num += 1
 
