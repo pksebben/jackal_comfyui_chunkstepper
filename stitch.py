@@ -19,6 +19,8 @@ from collections import defaultdict
 from pathlib import Path
 
 import cv2
+import numpy as np
+from PIL import Image
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff")
@@ -194,36 +196,52 @@ def select_chunk_file(
 ANIMATED_FORMATS = (".webp", ".gif")
 
 
-def convert_animated_to_video(input_path: Path, output_path: Path) -> bool:
-    """Convert an animated WebP/GIF to a video file.
+def convert_animated_to_video(
+    input_path: Path, output_path: Path, fps: int = 8
+) -> bool:
+    """Convert an animated WebP/GIF to a video file using Pillow.
 
     Args:
         input_path: Path to animated image
         output_path: Path for output video
+        fps: Frames per second for output video
 
     Returns:
         True if conversion succeeded, False otherwise
     """
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(input_path),
-        "-c:v",
-        "libx264",
-        "-crf",
-        "18",
-        "-preset",
-        "fast",
-        "-pix_fmt",
-        "yuv420p",
-        str(output_path),
-    ]
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return True
-    except subprocess.CalledProcessError:
+        img = Image.open(input_path)
+    except Exception:
         return False
+
+    # Extract all frames
+    frames: list[np.ndarray] = []
+    try:
+        while True:
+            # Convert to RGB and then to BGR for OpenCV
+            frame_rgb = img.convert("RGB")
+            frame_array = np.array(frame_rgb)
+            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
+            frames.append(frame_bgr)
+            img.seek(img.tell() + 1)
+    except EOFError:
+        pass  # End of frames
+
+    if not frames:
+        return False
+
+    # Get dimensions from first frame
+    height, width = frames[0].shape[:2]
+
+    # Write video using OpenCV
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+    for frame in frames:
+        writer.write(frame)
+
+    writer.release()
+    return True
 
 
 def prepare_chunks_for_concat(
