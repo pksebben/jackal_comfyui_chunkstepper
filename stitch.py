@@ -320,9 +320,9 @@ def stitch_videos(
 
         concat_file = create_concat_file(prepared_chunks, temp_path)
 
-        # FFmpeg command for lossless concatenation
+        # FFmpeg command for concatenation with H.264 encoding
         # -safe 0: Allow any file path in concat file
-        # -c:v libx264 -crf 0: Lossless H.264 encoding
+        # -c:v libx264 -crf 18: High quality H.264 encoding
         if audio_path is not None:
             # With audio: -c:a aac, -shortest to end when shortest input ends
             cmd = [
@@ -341,9 +341,13 @@ def stitch_videos(
                 "-pix_fmt",
                 "yuv420p",  # Required for QuickTime/broad player compatibility
                 "-crf",
-                "0",
+                "18",  # High quality (0=lossless is often problematic)
                 "-preset",
-                "ultrafast",
+                "medium",
+                "-vsync",
+                "cfr",  # Constant frame rate to fix timing issues
+                "-movflags",
+                "+faststart",  # Move moov atom to start for QuickTime
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -372,9 +376,13 @@ def stitch_videos(
                 "-pix_fmt",
                 "yuv420p",  # Required for QuickTime/broad player compatibility
                 "-crf",
-                "0",
+                "18",  # High quality (0=lossless is often problematic)
                 "-preset",
-                "ultrafast",
+                "medium",
+                "-vsync",
+                "cfr",  # Constant frame rate to fix timing issues
+                "-movflags",
+                "+faststart",  # Move moov atom to start for QuickTime
                 "-an",  # No audio
                 str(output_path),
             ]
@@ -418,7 +426,7 @@ The script will:
   2. Process chunks in ascending numerical order (0000, 0001, 0002, ...)
   3. Stop when a chunk number is missing
   4. Auto-select files when duplicates exist (based on --variation setting)
-  5. Output an uncompressed MP4, with audio if provided
+  5. Output a high-quality MP4, with audio if provided
         """,
     )
     parser.add_argument(
