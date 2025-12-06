@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import cv2
+import folder_paths
 import torch
 
 # Common video extensions to check for previous chunks
@@ -108,8 +109,14 @@ class VideoChunkStepper:
         Returns:
             Tuple of (output_path, frame)
         """
-        # Ensure chunks directory exists
+        # Resolve chunks directory path
+        # If relative, resolve against ComfyUI's output directory
         chunks_path = Path(chunks_directory)
+        if not chunks_path.is_absolute():
+            output_dir = Path(folder_paths.get_output_directory())
+            chunks_path = output_dir / chunks_path
+
+        # Ensure chunks directory exists
         if not chunks_path.exists():
             chunks_path.mkdir(parents=True, exist_ok=True)
 
