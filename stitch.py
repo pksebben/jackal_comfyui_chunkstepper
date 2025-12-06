@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Standalone CLI script to concatenate video chunks into a final video with audio.
+"""Standalone CLI script to concatenate video chunks into a final video.
 
 Usage:
-    python stitch.py <chunks_dir> <audio_path> [output_path]
+    python stitch.py <chunks_dir> [audio_path] [output_path]
 
 Examples:
+    python stitch.py ./chunks
     python stitch.py ./chunks ./audio.mp3
     python stitch.py ./chunks ./audio.wav ./final_output.mp4
 """
@@ -18,24 +19,53 @@ from collections import defaultdict
 from pathlib import Path
 
 import cv2
+import numpy as np
+from PIL import Image
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff")
+ALL_EXTENSIONS = VIDEO_EXTENSIONS + IMAGE_EXTENSIONS
 
 
-def find_chunks(chunks_dir: Path) -> dict[int, list[Path]]:
+def extract_counter(filename: str, chunk_num: int) -> int | None:
+    """Extract the ComfyUI counter number from a filename.
+
+    ComfyUI appends counter suffixes like _00001 or _00001_ to filenames.
+
+    Args:
+        filename: Filename stem (without extension)
+        chunk_num: Expected chunk number prefix (e.g., 0 for "0000")
+
+    Returns:
+        Counter number, or None if no counter pattern found
+    """
+    base_name = f"{chunk_num:04d}"
+    # Pattern: {base_name}_{counter} or {base_name}_{counter}_ or with suffix
+    # e.g., 0000_00001.mp4, 0000_suffix_00001_.mp4
+    pattern = rf"^{re.escape(base_name)}(?:_[^_]+)?_(\d+)_?$"
+    match = re.match(pattern, filename)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def find_chunks(chunks_dir: Path) -> dict[int, list[tuple[Path, int | None]]]:
     """Find all chunk files in the directory, grouped by chunk number.
 
     Args:
         chunks_dir: Directory containing chunk files
 
     Returns:
-        Dictionary mapping chunk number to list of matching files
+        Dictionary mapping chunk number to list of (file_path, counter) tuples.
+        Counter is None for files without ComfyUI counter suffix.
     """
-    chunks: dict[int, list[Path]] = defaultdict(list)
+    chunks: dict[int, list[tuple[Path, int | None]]] = defaultdict(list)
 
     # Pattern to match chunk files: 4-digit number at start, optionally followed
     # by suffix and/or ComfyUI counter
-    pattern = re.compile(r"^(\d{4}).*\.(mp4|webm|mov|avi|mkv|gif)$", re.IGNORECASE)
+    # Supports video and image extensions
+    ext_pattern = "|".join(ext.lstrip(".") for ext in ALL_EXTENSIONS)
+    pattern = re.compile(rf"^(\d{{4}}).*\.({ext_pattern})$", re.IGNORECASE)
 
     for file in chunks_dir.iterdir():
         if not file.is_file():
@@ -43,7 +73,8 @@ def find_chunks(chunks_dir: Path) -> dict[int, list[Path]]:
         match = pattern.match(file.name)
         if match:
             chunk_num = int(match.group(1))
-            chunks[chunk_num].append(file)
+            counter = extract_counter(file.stem, chunk_num)
+            chunks[chunk_num].append((file, counter))
 
     return dict(chunks)
 
@@ -83,43 +114,166 @@ def display_thumbnail(video_path: Path, chunk_num: int, index: int) -> None:
 
 def select_chunk_file(
     chunk_num: int,
-    candidates: list[Path],
+    candidates: list[tuple[Path, int | None]],
+    variation_preference: int = -1,
 ) -> Path:
-    """Let user select which file to use when multiple candidates exist.
+    """Select which file to use when multiple candidates exist.
+
+    Auto-selects based on variation_preference, or prompts user if -2 (interactive).
 
     Args:
         chunk_num: The chunk number
-        candidates: List of candidate files
+        candidates: List of (file_path, counter) tuples
+        variation_preference: -1 = lowest counter (default), -2 = interactive,
+                              0+ = prefer specific counter
 
     Returns:
         Selected file path
     """
     if len(candidates) == 1:
-        return candidates[0]
+        return candidates[0][0]
 
+    # Sort by counter (None treated as -1 to come first, then by counter value)
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda x: (x[1] is not None, x[1] if x[1] is not None else 0),
+    )
+
+    # Auto-select based on preference
+    if variation_preference == -1:
+        # Lowest counter (first after sorting)
+        selected = sorted_candidates[0][0]
+        print(f"  Chunk {chunk_num:04d}: auto-selected {selected.name} (lowest)")
+        return selected
+    elif variation_preference >= 0:
+        # Look for specific counter
+        for path, counter in sorted_candidates:
+            if counter == variation_preference:
+                print(
+                    f"  Chunk {chunk_num:04d}: auto-selected {path.name} "
+                    f"(counter {variation_preference})"
+                )
+                return path
+        # Fall back to lowest if preferred not found
+        selected = sorted_candidates[0][0]
+        print(
+            f"  Chunk {chunk_num:04d}: counter {variation_preference} not found, "
+            f"using {selected.name}"
+        )
+        return selected
+
+    # Interactive mode (variation_preference == -2)
     print(f"\nMultiple files found for chunk {chunk_num:04d}:")
     print("Showing video info for each candidate:\n")
 
-    # Sort by modification time (newest first)
-    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+    # For interactive display, sort by modification time (newest first)
+    display_candidates = sorted(
+        candidates, key=lambda x: x[0].stat().st_mtime, reverse=True
+    )
 
-    for i, candidate in enumerate(candidates):
-        display_thumbnail(candidate, chunk_num, i)
+    for i, (path, counter) in enumerate(display_candidates):
+        display_thumbnail(path, chunk_num, i)
+        if counter is not None:
+            print(f"       Counter: {counter}")
 
     while True:
         try:
             choice = input(
-                f"\nSelect file for chunk {chunk_num:04d} [0-{len(candidates) - 1}]: "
+                f"\nSelect file for chunk {chunk_num:04d} "
+                f"[0-{len(display_candidates) - 1}]: "
             )
             idx = int(choice.strip())
-            if 0 <= idx < len(candidates):
-                return candidates[idx]
-            print(f"Please enter a number between 0 and {len(candidates) - 1}")
+            if 0 <= idx < len(display_candidates):
+                return display_candidates[idx][0]
+            print(f"Please enter a number between 0 and {len(display_candidates) - 1}")
         except ValueError:
             print("Please enter a valid number")
         except KeyboardInterrupt:
             print("\nAborted by user")
             sys.exit(1)
+
+
+ANIMATED_FORMATS = (".webp", ".gif")
+
+
+def convert_animated_to_video(
+    input_path: Path, output_path: Path, fps: int = 8
+) -> bool:
+    """Convert an animated WebP/GIF to a video file using Pillow.
+
+    Args:
+        input_path: Path to animated image
+        output_path: Path for output video
+        fps: Frames per second for output video
+
+    Returns:
+        True if conversion succeeded, False otherwise
+    """
+    try:
+        img = Image.open(input_path)
+    except Exception:
+        return False
+
+    # Extract all frames
+    frames: list[np.ndarray] = []
+    try:
+        while True:
+            # Convert to RGB and then to BGR for OpenCV
+            frame_rgb = img.convert("RGB")
+            frame_array = np.array(frame_rgb)
+            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
+            frames.append(frame_bgr)
+            img.seek(img.tell() + 1)
+    except EOFError:
+        pass  # End of frames
+
+    if not frames:
+        return False
+
+    # Get dimensions from first frame
+    height, width = frames[0].shape[:2]
+
+    # Write video using OpenCV
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+    for frame in frames:
+        writer.write(frame)
+
+    writer.release()
+    return True
+
+
+def prepare_chunks_for_concat(
+    chunks: list[Path], temp_dir: Path
+) -> tuple[list[Path], bool]:
+    """Prepare chunks for concatenation, converting animated formats if needed.
+
+    Args:
+        chunks: List of chunk files
+        temp_dir: Temporary directory for converted files
+
+    Returns:
+        Tuple of (prepared chunk paths, whether any conversion was done)
+    """
+    prepared: list[Path] = []
+    any_converted = False
+
+    for i, chunk in enumerate(chunks):
+        if chunk.suffix.lower() in ANIMATED_FORMATS:
+            # Convert animated format to video
+            converted_path = temp_dir / f"chunk_{i:04d}.mp4"
+            print(f"  Converting {chunk.name} to video...")
+            if convert_animated_to_video(chunk, converted_path):
+                prepared.append(converted_path)
+                any_converted = True
+            else:
+                print(f"  Warning: Failed to convert {chunk.name}, using original")
+                prepared.append(chunk)
+        else:
+            prepared.append(chunk)
+
+    return prepared, any_converted
 
 
 def create_concat_file(chunks: list[Path], temp_dir: Path) -> Path:
@@ -143,55 +297,85 @@ def create_concat_file(chunks: list[Path], temp_dir: Path) -> Path:
 
 def stitch_videos(
     chunks: list[Path],
-    audio_path: Path,
     output_path: Path,
+    audio_path: Path | None = None,
 ) -> None:
-    """Concatenate video chunks and add audio using FFmpeg.
+    """Concatenate video chunks and optionally add audio using FFmpeg.
 
     Args:
         chunks: List of chunk files in order
-        audio_path: Path to audio file
         output_path: Output file path
+        audio_path: Path to audio file (optional)
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        concat_file = create_concat_file(chunks, temp_path)
 
-        # FFmpeg command for lossless concatenation with audio
+        # Convert animated formats (webp, gif) to video first
+        has_animated = any(c.suffix.lower() in ANIMATED_FORMATS for c in chunks)
+        if has_animated:
+            print("\nConverting animated chunks to video format...")
+            prepared_chunks, _ = prepare_chunks_for_concat(chunks, temp_path)
+        else:
+            prepared_chunks = chunks
+
+        concat_file = create_concat_file(prepared_chunks, temp_path)
+
+        # FFmpeg command for lossless concatenation
         # -safe 0: Allow any file path in concat file
         # -c:v libx264 -crf 0: Lossless H.264 encoding
-        # -c:a aac: AAC audio encoding
-        # -shortest: End output when shortest input ends
-        cmd = [
-            "ffmpeg",
-            "-y",  # Overwrite output without asking
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_file),
-            "-i",
-            str(audio_path),
-            "-c:v",
-            "libx264",
-            "-crf",
-            "0",
-            "-preset",
-            "ultrafast",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "320k",
-            "-shortest",
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            str(output_path),
-        ]
+        if audio_path is not None:
+            # With audio: -c:a aac, -shortest to end when shortest input ends
+            cmd = [
+                "ffmpeg",
+                "-y",  # Overwrite output without asking
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-i",
+                str(audio_path),
+                "-c:v",
+                "libx264",
+                "-crf",
+                "0",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-shortest",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                str(output_path),
+            ]
+            print(f"\nStitching {len(chunks)} chunks with audio...")
+        else:
+            # Without audio: video only
+            cmd = [
+                "ffmpeg",
+                "-y",  # Overwrite output without asking
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c:v",
+                "libx264",
+                "-crf",
+                "0",
+                "-preset",
+                "ultrafast",
+                "-an",  # No audio
+                str(output_path),
+            ]
+            print(f"\nStitching {len(chunks)} chunks (no audio)...")
 
-        print(f"\nStitching {len(chunks)} chunks with audio...")
         print(f"Output: {output_path}")
 
         try:
@@ -216,19 +400,21 @@ def stitch_videos(
 def main() -> None:
     """Main entry point for the stitch script."""
     parser = argparse.ArgumentParser(
-        description="Concatenate video chunks into a final video with audio.",
+        description="Concatenate video chunks into a final video, optionally with audio.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+    python stitch.py ./chunks
     python stitch.py ./chunks ./audio.mp3
     python stitch.py ./chunks ./audio.wav ./final_output.mp4
+    python stitch.py ./chunks -v -2  # interactive mode for duplicates
 
 The script will:
   1. Scan chunks_dir for files matching pattern {chunk_number:04d}*.*
   2. Process chunks in ascending numerical order (0000, 0001, 0002, ...)
   3. Stop when a chunk number is missing
-  4. Prompt for selection when multiple files match the same chunk number
-  5. Output an uncompressed MP4 with the provided audio
+  4. Auto-select files when duplicates exist (based on --variation setting)
+  5. Output an uncompressed MP4, with audio if provided
         """,
     )
     parser.add_argument(
@@ -239,7 +425,9 @@ The script will:
     parser.add_argument(
         "audio_path",
         type=Path,
-        help="Path to audio file to mux into final video",
+        nargs="?",
+        default=None,
+        help="Path to audio file to mux into final video (optional)",
     )
     parser.add_argument(
         "output_path",
@@ -247,6 +435,17 @@ The script will:
         nargs="?",
         default=Path("output.mp4"),
         help="Output file path (default: output.mp4)",
+    )
+    parser.add_argument(
+        "-v",
+        "--variation",
+        type=int,
+        default=-1,
+        help=(
+            "ComfyUI counter preference when duplicates exist. "
+            "-1 = lowest counter (default), -2 = interactive picker, "
+            "0+ = prefer specific counter number"
+        ),
     )
 
     args = parser.parse_args()
@@ -263,7 +462,7 @@ The script will:
         print(f"Error: Not a directory: {args.chunks_dir}", file=sys.stderr)
         sys.exit(1)
 
-    if not args.audio_path.exists():
+    if args.audio_path is not None and not args.audio_path.exists():
         print(f"Error: Audio file does not exist: {args.audio_path}", file=sys.stderr)
         sys.exit(1)
 
@@ -289,7 +488,7 @@ The script will:
 
     while chunk_num in chunk_map:
         candidates = chunk_map[chunk_num]
-        selected = select_chunk_file(chunk_num, candidates)
+        selected = select_chunk_file(chunk_num, candidates, args.variation)
         ordered_chunks.append(selected)
         chunk_num += 1
 
@@ -311,7 +510,7 @@ The script will:
         print(f"  {i:04d}: {chunk.name}")
 
     # Stitch videos
-    stitch_videos(ordered_chunks, args.audio_path, args.output_path)
+    stitch_videos(ordered_chunks, args.output_path, args.audio_path)
 
 
 if __name__ == "__main__":
