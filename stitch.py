@@ -338,6 +338,8 @@ def stitch_videos(
                 str(audio_path),
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",  # Required for QuickTime/broad player compatibility
                 "-crf",
                 "0",
                 "-preset",
@@ -367,6 +369,8 @@ def stitch_videos(
                 str(concat_file),
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",  # Required for QuickTime/broad player compatibility
                 "-crf",
                 "0",
                 "-preset",
