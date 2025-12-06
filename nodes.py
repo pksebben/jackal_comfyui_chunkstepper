@@ -8,7 +8,9 @@ from pathlib import Path
 
 import cv2
 import folder_paths
+import numpy as np
 import torch
+from PIL import Image
 
 # Common video extensions to check for previous chunks
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
@@ -264,12 +266,55 @@ class VideoChunkStepper:
         """
         ext = media_path.suffix.lower()
 
-        # Handle image files directly
+        # Formats that can be animated - use Pillow which handles them properly
+        animated_formats = (".webp", ".gif")
+
+        if ext in animated_formats:
+            return self._extract_last_frame_pillow(media_path)
+
+        # Handle static image files directly
         if ext in IMAGE_EXTENSIONS:
             return self._load_image(media_path)
 
         # Handle video files
         return self._extract_last_video_frame(media_path)
+
+    def _extract_last_frame_pillow(self, image_path: Path) -> torch.Tensor:
+        """Extract the last frame from an animated image using Pillow.
+
+        Works with animated webp, gif, and static images.
+
+        Args:
+            image_path: Path to the image file
+
+        Returns:
+            Last frame as IMAGE tensor [1, H, W, C] with values in [0, 1]
+
+        Raises:
+            ValueError: If image can't be read
+        """
+        try:
+            img = Image.open(image_path)
+        except Exception as e:
+            raise ValueError(f"Could not open image file: {image_path}") from e
+
+        # Seek to the last frame for animated images
+        try:
+            while True:
+                img.seek(img.tell() + 1)
+        except EOFError:
+            # Reached the last frame
+            pass
+
+        # Convert to RGB (handles RGBA, P mode, etc.)
+        img_rgb = img.convert("RGB")
+
+        # Convert to numpy array then tensor
+        frame_array = np.array(img_rgb, dtype=np.float32) / 255.0
+        frame_tensor = torch.from_numpy(frame_array)
+        frame_tensor = frame_tensor.unsqueeze(0)  # Add batch dimension [1, H, W, C]
+
+        return frame_tensor
 
     def _load_image(self, image_path: Path) -> torch.Tensor:
         """Load an image file as a tensor.
@@ -314,20 +359,20 @@ class VideoChunkStepper:
             raise ValueError(f"Could not open video file: {video_path}")
 
         try:
-            # Get total frame count
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if frame_count <= 0:
+            # Iterate through all frames to reliably get the last one
+            # Note: cap.set(CAP_PROP_POS_FRAMES) is unreliable for many codecs
+            last_frame = None
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                last_frame = frame
+
+            if last_frame is None:
                 raise ValueError(f"Video has no frames: {video_path}")
 
-            # Seek to last frame
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count - 1)
-
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                raise ValueError(f"Could not read last frame from: {video_path}")
-
             # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
 
             # Convert to tensor with shape [1, H, W, C] and normalize to [0, 1]
             frame_tensor = torch.from_numpy(frame_rgb).float() / 255.0
