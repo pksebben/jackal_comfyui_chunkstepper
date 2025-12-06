@@ -264,7 +264,14 @@ class VideoChunkStepper:
         """
         ext = media_path.suffix.lower()
 
-        # Handle image files directly
+        # Formats that can be animated - treat like videos
+        animated_formats = (".webp", ".gif")
+
+        if ext in animated_formats:
+            # Use VideoCapture to handle animated formats
+            return self._extract_last_video_frame(media_path)
+
+        # Handle static image files directly
         if ext in IMAGE_EXTENSIONS:
             return self._load_image(media_path)
 
