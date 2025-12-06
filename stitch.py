@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Standalone CLI script to concatenate video chunks into a final video with audio.
+"""Standalone CLI script to concatenate video chunks into a final video.
 
 Usage:
-    python stitch.py <chunks_dir> <audio_path> [output_path]
+    python stitch.py <chunks_dir> [audio_path] [output_path]
 
 Examples:
+    python stitch.py ./chunks
     python stitch.py ./chunks ./audio.mp3
     python stitch.py ./chunks ./audio.wav ./final_output.mp4
 """
@@ -143,55 +144,76 @@ def create_concat_file(chunks: list[Path], temp_dir: Path) -> Path:
 
 def stitch_videos(
     chunks: list[Path],
-    audio_path: Path,
     output_path: Path,
+    audio_path: Path | None = None,
 ) -> None:
-    """Concatenate video chunks and add audio using FFmpeg.
+    """Concatenate video chunks and optionally add audio using FFmpeg.
 
     Args:
         chunks: List of chunk files in order
-        audio_path: Path to audio file
         output_path: Output file path
+        audio_path: Path to audio file (optional)
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         concat_file = create_concat_file(chunks, temp_path)
 
-        # FFmpeg command for lossless concatenation with audio
+        # FFmpeg command for lossless concatenation
         # -safe 0: Allow any file path in concat file
         # -c:v libx264 -crf 0: Lossless H.264 encoding
-        # -c:a aac: AAC audio encoding
-        # -shortest: End output when shortest input ends
-        cmd = [
-            "ffmpeg",
-            "-y",  # Overwrite output without asking
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_file),
-            "-i",
-            str(audio_path),
-            "-c:v",
-            "libx264",
-            "-crf",
-            "0",
-            "-preset",
-            "ultrafast",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "320k",
-            "-shortest",
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            str(output_path),
-        ]
+        if audio_path is not None:
+            # With audio: -c:a aac, -shortest to end when shortest input ends
+            cmd = [
+                "ffmpeg",
+                "-y",  # Overwrite output without asking
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-i",
+                str(audio_path),
+                "-c:v",
+                "libx264",
+                "-crf",
+                "0",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-shortest",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                str(output_path),
+            ]
+            print(f"\nStitching {len(chunks)} chunks with audio...")
+        else:
+            # Without audio: video only
+            cmd = [
+                "ffmpeg",
+                "-y",  # Overwrite output without asking
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c:v",
+                "libx264",
+                "-crf",
+                "0",
+                "-preset",
+                "ultrafast",
+                "-an",  # No audio
+                str(output_path),
+            ]
+            print(f"\nStitching {len(chunks)} chunks (no audio)...")
 
-        print(f"\nStitching {len(chunks)} chunks with audio...")
         print(f"Output: {output_path}")
 
         try:
@@ -216,10 +238,11 @@ def stitch_videos(
 def main() -> None:
     """Main entry point for the stitch script."""
     parser = argparse.ArgumentParser(
-        description="Concatenate video chunks into a final video with audio.",
+        description="Concatenate video chunks into a final video, optionally with audio.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+    python stitch.py ./chunks
     python stitch.py ./chunks ./audio.mp3
     python stitch.py ./chunks ./audio.wav ./final_output.mp4
 
@@ -228,7 +251,7 @@ The script will:
   2. Process chunks in ascending numerical order (0000, 0001, 0002, ...)
   3. Stop when a chunk number is missing
   4. Prompt for selection when multiple files match the same chunk number
-  5. Output an uncompressed MP4 with the provided audio
+  5. Output an uncompressed MP4, with audio if provided
         """,
     )
     parser.add_argument(
@@ -239,7 +262,9 @@ The script will:
     parser.add_argument(
         "audio_path",
         type=Path,
-        help="Path to audio file to mux into final video",
+        nargs="?",
+        default=None,
+        help="Path to audio file to mux into final video (optional)",
     )
     parser.add_argument(
         "output_path",
@@ -263,7 +288,7 @@ The script will:
         print(f"Error: Not a directory: {args.chunks_dir}", file=sys.stderr)
         sys.exit(1)
 
-    if not args.audio_path.exists():
+    if args.audio_path is not None and not args.audio_path.exists():
         print(f"Error: Audio file does not exist: {args.audio_path}", file=sys.stderr)
         sys.exit(1)
 
@@ -311,7 +336,7 @@ The script will:
         print(f"  {i:04d}: {chunk.name}")
 
     # Stitch videos
-    stitch_videos(ordered_chunks, args.audio_path, args.output_path)
+    stitch_videos(ordered_chunks, args.output_path, args.audio_path)
 
 
 if __name__ == "__main__":
